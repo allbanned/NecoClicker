@@ -94,7 +94,7 @@ NecoClicker/
     └── src/
         ├── App.tsx               — корневой shell (sidebar + main)
         ├── main.tsx              — entry
-        ├── index.css             — Tailwind + 10 тем (HSL переменные)
+        ├── index.css             — Tailwind + 6 тем (HSL переменные)
         ├── lib/utils.ts          — cn() helper
         ├── hooks/                — useConfig, useEngine
         ├── components/
@@ -113,20 +113,16 @@ NecoClicker/
 
 ## Темы
 
-10 тем переключаются мгновенно через `data-theme` атрибут на `<html>`:
+6 тем, переключаются мгновенно через `data-theme` атрибут на `<html>`. При первом запуске берётся системная (`prefers-color-scheme`).
 
-| ID            | Описание                                  |
-|---------------|-------------------------------------------|
-| `light`       | Дефолт, светлый, нейтральный              |
-| `dark`        | Классический тёмный                       |
-| `red-neon`    | Киберпанк, чёрный фон + ядовитый красный  |
-| `red-soft`    | Пастельный розово-красный                 |
-| `purple-neon` | Ультра-фиолетовый, неоновый               |
-| `purple-soft` | Лиловый soft                              |
-| `green-neon`  | Кислотно-зелёный матрица                  |
-| `green-soft`  | Мятный пастельный                         |
-| `lavender`    | Пурпурно-лавандовый, нежно-холодный       |
-| `vampire`     | Алый/тёмно-винный, ночной                 |
+| ID            | Описание                                       |
+|---------------|------------------------------------------------|
+| `light`       | Светлый нейтральный                            |
+| `dark`        | Классический тёмный                            |
+| `enemy-dark`  | Почти-OLED-чёрный, минимум контраста           |
+| `purple-neon` | Ультра-фиолетовый неон                         |
+| `green-neon`  | Кислотно-зелёный матрица                       |
+| `vampire`     | Алый/тёмно-винный, ночной                      |
 
 Все цвета — HSL CSS-переменные в `frontend/src/index.css`. Хочешь свою — добавляешь блок и регистрируешь в `theme-provider.tsx`.
 
@@ -154,13 +150,24 @@ NecoClicker/
 
 ```json
 {
-  "simple": {
-    "button": "left",
-    "interval_ms": 100,
-    "use_current": true,
-    "x": 0, "y": 0,
-    "hotkey": "F6"
-  },
+  "profiles": [
+    {
+      "name": "Default",
+      "button": "left",
+      "interval_ms": 100,
+      "use_current": true,
+      "x": 0, "y": 0,
+      "hotkey": "F6"
+    },
+    {
+      "name": "Max speed",
+      "button": "left",
+      "interval_ms": 0,
+      "use_current": true,
+      "hotkey": "F7"
+    }
+  ],
+  "active": 0,
   "chains": [
     {
       "name": "AFK farm",
@@ -170,13 +177,17 @@ NecoClicker/
         {"type": "click",  "button": "left", "use_current": true},
         {"type": "delay",  "delay_ms": 250},
         {"type": "move",   "x": 200, "y": 0, "relative": true},
-        {"type": "click",  "button": "right", "x": 1280, "y": 720}
+        {"type": "click",  "button": "x1", "x": 1280, "y": 720}
       ]
     }
   ],
-  "theme": "purple-neon"
+  "theme": "enemy-dark"
 }
 ```
+
+`interval_ms` — `float`. Поддерживаются доли миллисекунды (`0.5`, `0.001`). `0` означает максимальную скорость без сна (tight loop, 100% одного ядра CPU). Глобальный хоткей привязан только к **активному** профилю (`active` — индекс в `profiles`).
+
+Поддерживаемые кнопки: `left`, `right`, `middle`, `x1` (Mouse4), `x2` (Mouse5).
 
 ## Хоткеи
 
