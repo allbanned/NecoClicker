@@ -1,11 +1,21 @@
 import { useEffect, useState } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { ConfigPath, ImportConfigFromFile, ExportConfigToFile } from '../../wailsjs/go/main/App'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Switch } from '@/components/ui/switch'
+import {
+  ConfigPath, ImportConfigFromFile, ExportConfigToFile,
+  SetClickJitterPx, SetOverlayEnabled, SetPauseHotkey,
+} from '../../wailsjs/go/main/App'
 import { BrowserOpenURL } from '../../wailsjs/runtime/runtime'
-import { Folder, Keyboard, Info, Github, User, ExternalLink, Download, Upload, Database } from 'lucide-react'
+import {
+  Folder, Keyboard, Info, Github, User, ExternalLink, Download, Upload, Database,
+  Sparkles, Pause, Eye,
+} from 'lucide-react'
 import { useConfig } from '@/hooks/use-config'
 import { useConfirm } from '@/components/confirm-dialog'
+import { HotkeyRecorder } from '@/components/hotkey-recorder'
 import necoUrl from '@/assets/neco.png'
 
 const GITHUB_URL = 'https://github.com/BarcaF1/NecoClicker'
@@ -14,8 +24,12 @@ const AUTHOR = 'allbanned'
 export function SettingsPage() {
   const [path, setPath] = useState('')
   useEffect(() => { ConfigPath().then(setPath) }, [])
-  const { reload } = useConfig()
+  const { cfg, reload } = useConfig()
   const { ask, alert: showAlert } = useConfirm()
+
+  const jitter = cfg?.click_jitter_px ?? 0
+  const overlayOn = cfg?.overlay_enabled ?? true
+  const pauseHk = cfg?.pause_hotkey ?? 'F8'
 
   const onImport = async () => {
     const ok = await ask({
@@ -44,6 +58,65 @@ export function SettingsPage() {
 
   return (
     <div className="space-y-6">
+      {/* Поведение кликера */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Sparkles className="h-5 w-5 text-primary" /> Поведение
+          </CardTitle>
+          <CardDescription>Глобальные настройки кликов и UI.</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Click jitter */}
+          <div>
+            <div className="flex items-center justify-between gap-3">
+              <Label htmlFor="cj">Случайное смещение клика, ±N px</Label>
+              <span className="font-mono text-xs text-primary">{jitter}</span>
+            </div>
+            <input
+              id="cj"
+              type="range"
+              min="0"
+              max="20"
+              step="1"
+              value={jitter}
+              onChange={async (e) => { await SetClickJitterPx(parseInt(e.target.value)); reload() }}
+              className="mt-2 w-full accent-primary"
+            />
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Каждый клик уходит в случайную точку в радиусе ±N пикселей от заданной. Помогает обходить детекторы "идеально совпавших координат". 0 = выключено.
+            </p>
+          </div>
+
+          {/* Overlay */}
+          <label className={`flex items-center justify-between gap-3 rounded-md border px-3 py-2.5 text-sm transition-colors ${overlayOn ? 'border-primary/40 bg-primary/5' : 'bg-muted/30'}`}>
+            <div className="flex items-start gap-2">
+              <Eye className={`mt-0.5 h-4 w-4 shrink-0 ${overlayOn ? 'text-primary' : 'text-muted-foreground'}`} />
+              <div>
+                <div className="font-medium text-foreground">Click-ping overlay</div>
+                <div className="text-xs text-muted-foreground">Прозрачная вспышка прямо на экране в точке клика. Видно что бот делает.</div>
+              </div>
+            </div>
+            <Switch checked={overlayOn} onCheckedChange={async (v) => { await SetOverlayEnabled(v); reload() }} />
+          </label>
+
+          {/* Pause hotkey */}
+          <div>
+            <Label className="mb-1.5 flex items-center gap-1.5">
+              <Pause className="h-3.5 w-3.5" /> Хоткей паузы / возобновления
+            </Label>
+            <HotkeyRecorder
+              value={pauseHk}
+              onChange={async (v) => { await SetPauseHotkey(v); reload() }}
+              placeholder="F8"
+            />
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Замораживает выполнение в любой момент — кликер ждёт пока не нажмёшь снова. Отдельно от пуск/стоп активного профиля.
+            </p>
+          </div>
+        </CardContent>
+      </Card>
+
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -109,7 +182,7 @@ export function SettingsPage() {
           <div className="flex items-center gap-4">
             <img src={necoUrl} alt="" className="h-20 w-20 rounded-xl border border-border object-cover" />
             <div className="space-y-1 text-sm">
-              <div className="text-base font-semibold">NecoClicker <span className="text-muted-foreground">v1.3</span></div>
+              <div className="text-base font-semibold">NecoClicker <span className="text-muted-foreground">v1.4</span></div>
               <div className="text-xs text-muted-foreground">
                 Лёгкий автокликер с глобальными хоткеями и редактором макросов.<br />
                 Go · Wails · React · Tailwind.

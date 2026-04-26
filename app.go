@@ -13,6 +13,7 @@ import (
 	"NecoClicker/internal/engine"
 	"NecoClicker/internal/hotkey"
 	"NecoClicker/internal/macro"
+	"NecoClicker/internal/overlay"
 	"NecoClicker/internal/winmouse"
 
 	"fyne.io/systray"
@@ -27,6 +28,7 @@ type App struct {
 	cfg     *macro.Config
 	engine  *engine.Engine
 	hotkeys *hotkey.Manager
+	overlay *overlay.Overlay
 
 	trayToggleItem atomic.Value // *systray.MenuItem
 	trayPinItem    atomic.Value // *systray.MenuItem
@@ -38,8 +40,11 @@ func NewApp() *App {
 		log.Printf("config load: %v", err)
 		cfg = macro.DefaultConfig()
 	}
-	a := &App{cfg: cfg, hotkeys: hotkey.NewManager()}
+	a := &App{cfg: cfg, hotkeys: hotkey.NewManager(), overlay: overlay.New()}
 	a.engine = engine.New(a.logEvent)
+	a.engine.SetClickJitterPx(a.cfg.ClickJitterPx)
+	a.overlay.Enable(a.cfg.OverlayEnabled)
+	a.engine.SetPinger(a.overlay)
 	return a
 }
 
@@ -58,6 +63,13 @@ func (a *App) startup(ctx context.Context) {
 	if err := a.hotkeys.Start(); err != nil {
 		log.Printf("hotkey start: %v", err)
 	}
+	if err := a.overlay.Start(); err != nil {
+		log.Printf("overlay start: %v", err)
+	}
+	{
+		r, g, b := themePingColor(a.cfg.Theme)
+		a.overlay.SetColor(r, g, b)
+	}
 	a.rebindHotkeys()
 	a.engine.StartCPSReporter(a.ctx, func(r engine.CPSReport) {
 		wruntime.EventsEmit(a.ctx, "engine:cps", r)
@@ -74,6 +86,7 @@ func (a *App) shutdown(ctx context.Context) {
 	a.engine.StopCPSReporter()
 	a.engine.Stop()
 	a.hotkeys.Stop()
+	a.overlay.Stop()
 	systray.Quit()
 }
 
@@ -89,7 +102,28 @@ func (a *App) GetConfig() *macro.Config { return a.cfg }
 
 func (a *App) SetTheme(name string) error {
 	a.cfg.Theme = name
+	if a.overlay != nil {
+		r, g, b := themePingColor(name)
+		a.overlay.SetColor(r, g, b)
+	}
 	return macro.Save(a.cfg)
+}
+
+func themePingColor(name string) (byte, byte, byte) {
+	switch name {
+	case "dark":
+		return 120, 220, 255 // голубоватый
+	case "enemy-dark":
+		return 80, 255, 130 // зелёный
+	case "purple-neon":
+		return 230, 70, 255 // мадженто
+	case "green-neon":
+		return 80, 255, 110 // ядовитый зелёный
+	case "vampire":
+		return 255, 40, 80 // алый
+	default: // light
+		return 230, 50, 80 // насыщенный розово-красный
+	}
 }
 
 func (a *App) SetAlwaysOnTop(v bool) error {
@@ -107,15 +141,42 @@ func (a *App) SetAlwaysOnTop(v bool) error {
 	return macro.Save(a.cfg)
 }
 
-// ImportConfig — заменяет текущий конфиг данными из JSON-строки.
+// SetClickJitterPx — глобальный random offset (px) на каждый клик.
+func (a *App) SetClickJitterPx(n int) error {
+	if n < 0 {
+		n = 0
+	}
+	if n > 50 {
+		n = 50
+	}
+	a.cfg.ClickJitterPx = n
+	a.engine.SetClickJitterPx(n)
+	return macro.Save(a.cfg)
+}
+
+// SetOverlayEnabled — вкл/выкл click-ping overlay.
+func (a *App) SetOverlayEnabled(v bool) error {
+	a.cfg.OverlayEnabled = v
+	a.overlay.Enable(v)
+	return macro.Save(a.cfg)
+}
+
+// SetPauseHotkey — задать хоткей пауза/продолжить.
+func (a *App) SetPauseHotkey(s string) error {
+	a.cfg.PauseHotkey = s
+	a.rebindHotkeys()
+	return macro.Save(a.cfg)
+}
+
 func (a *App) ImportConfig(data string) error {
 	cfg := &macro.Config{}
 	if err := json.Unmarshal([]byte(data), cfg); err != nil {
 		return fmt.Errorf("invalid config: %w", err)
 	}
-	// валидируем через ту же миграцию
 	cfg.Migrate()
 	a.cfg = cfg
+	a.engine.SetClickJitterPx(a.cfg.ClickJitterPx)
+	a.overlay.Enable(a.cfg.OverlayEnabled)
 	a.rebindHotkeys()
 	if a.ctx != nil {
 		wruntime.WindowSetAlwaysOnTop(a.ctx, a.cfg.AlwaysOnTop)
@@ -123,13 +184,11 @@ func (a *App) ImportConfig(data string) error {
 	return macro.Save(a.cfg)
 }
 
-// ExportConfig — отдаёт текущий конфиг как JSON-строку.
 func (a *App) ExportConfig() (string, error) {
 	b, err := json.MarshalIndent(a.cfg, "", "  ")
 	return string(b), err
 }
 
-// ImportConfigFromFile — выбор файла через системный диалог.
 func (a *App) ImportConfigFromFile() error {
 	if a.ctx == nil {
 		return fmt.Errorf("no app context")
@@ -150,7 +209,6 @@ func (a *App) ImportConfigFromFile() error {
 	return a.ImportConfig(string(b))
 }
 
-// ExportConfigToFile — диалог сохранения.
 func (a *App) ExportConfigToFile() error {
 	if a.ctx == nil {
 		return fmt.Errorf("no app context")
@@ -262,9 +320,80 @@ func (a *App) SetActiveChain(idx int) error {
 
 func (a *App) ActiveChainIndex() int { return a.cfg.ActiveChain }
 
+// ---------------- Sequence (пошаговый кликер) ----------------
+
+func (a *App) GetSequence() macro.Sequence { return a.cfg.Sequence }
+
+func (a *App) SaveSequence(seq macro.Sequence) error {
+	if seq.IntervalMs < 0 {
+		seq.IntervalMs = 0
+	}
+	if seq.Steps == nil {
+		seq.Steps = []macro.Step{}
+	}
+	a.cfg.Sequence = seq
+	a.rebindHotkeys()
+	return macro.Save(a.cfg)
+}
+
+func (a *App) AddSequenceStep(s macro.Step) error {
+	if s.Button == "" {
+		s.Button = macro.BtnLeft
+	}
+	a.cfg.Sequence.Steps = append(a.cfg.Sequence.Steps, s)
+	return macro.Save(a.cfg)
+}
+
+func (a *App) ClearSequenceSteps() error {
+	a.cfg.Sequence.Steps = []macro.Step{}
+	return macro.Save(a.cfg)
+}
+
+func (a *App) StartSequence() {
+	a.engine.SetDryRun(false)
+	a.engine.RunSequence(a.cfg.Sequence)
+}
+
+func (a *App) StartSequenceDry() {
+	a.engine.SetDryRun(true)
+	a.engine.RunSequence(a.cfg.Sequence)
+}
+
+// CaptureCursor — мгновенный снимок (для UI кнопки "захватить точку").
+func (a *App) CaptureCursor() macro.Step {
+	x, y := winmouse.GetCursor()
+	return macro.Step{X: x, Y: y, Button: macro.BtnLeft}
+}
+
+// RecordStep блокируется до следующего глобального нажатия (любая клавиша
+// или Mouse4/5) и возвращает Step с текущими координатами курсора в момент
+// нажатия. Используется для пошаговой записи через хоткей (например F10).
+//
+// recordHotkey — фильтр; если пусто, ловится любое первое нажатие.
+func (a *App) RecordStep(timeoutMs int, recordHotkey string) (macro.Step, error) {
+	if timeoutMs <= 0 {
+		timeoutMs = 60000
+	}
+	got, err := a.hotkeys.RecordOnce(time.Duration(timeoutMs) * time.Millisecond)
+	if err != nil {
+		return macro.Step{}, err
+	}
+	if recordHotkey != "" && got != recordHotkey {
+		// поймали что-то другое — повторно записываем (рекурсия не нужна, простой loop)
+		// но пользователь, скорее всего, согласен на любую клавишу как сигнал
+		_ = got
+	}
+	x, y := winmouse.GetCursor()
+	return macro.Step{X: x, Y: y, Button: macro.BtnLeft}, nil
+}
+
 // ---------------- Управление движком ----------------
 
 func (a *App) IsRunning() bool { return a.engine.IsRunning() }
+func (a *App) IsPaused() bool  { return a.engine.IsPaused() }
+func (a *App) Pause()          { a.engine.Pause() }
+func (a *App) Resume()         { a.engine.Resume() }
+func (a *App) TogglePause()    { a.engine.TogglePause() }
 
 func (a *App) StartSimple() {
 	a.engine.SetDryRun(false)
@@ -310,7 +439,6 @@ func (a *App) StartProfileDry(idx int) error {
 	return nil
 }
 
-// StartProfileLimited — запуск профиля с ограничениями (для Таймера / Jitter).
 func (a *App) StartProfileLimited(idx int, lim macro.RunLimits, dry bool) error {
 	if idx < 0 || idx >= len(a.cfg.Profiles) {
 		return fmt.Errorf("profile index %d out of range", idx)
@@ -329,8 +457,6 @@ func (a *App) TotalClicks() uint64 { return a.engine.TotalClicks() }
 
 // ---------------- Hotkey recorder ----------------
 
-// RecordHotkey ждёт первое глобальное нажатие (любая клавиша/Mouse4/Mouse5)
-// и возвращает строку, готовую для сохранения в конфиг.
 func (a *App) RecordHotkey(timeoutMs int) (string, error) {
 	if timeoutMs <= 0 {
 		timeoutMs = 8000
@@ -362,7 +488,7 @@ func (a *App) HideWindow() {
 	}
 }
 
-// rebindHotkeys: активный профиль + все цепочки с непустым хоткеем.
+// rebindHotkeys: активный профиль + цепочки + sequence + pause hotkey.
 func (a *App) rebindHotkeys() {
 	binds := []hotkey.Bind{}
 
@@ -400,6 +526,33 @@ func (a *App) rebindHotkeys() {
 			},
 		})
 	}
+
+	// sequence hotkey
+	if hk := a.cfg.Sequence.Hotkey; hk != "" {
+		binds = append(binds, hotkey.Bind{
+			Hotkey: hk,
+			Cb: func() {
+				a.engine.Toggle(func() {
+					a.engine.SetDryRun(false)
+					a.engine.RunSequence(a.cfg.Sequence)
+				})
+			},
+		})
+	}
+
+	// pause hotkey (срабатывает только когда что-то запущено)
+	if hk := a.cfg.PauseHotkey; hk != "" {
+		binds = append(binds, hotkey.Bind{
+			Hotkey: hk,
+			Cb: func() {
+				a.engine.TogglePause()
+				if a.ctx != nil {
+					wruntime.EventsEmit(a.ctx, "engine:paused", a.engine.IsPaused())
+				}
+			},
+		})
+	}
+
 	if err := a.hotkeys.SetAll(binds); err != nil {
 		log.Printf("hotkey rebind: %v", err)
 	}

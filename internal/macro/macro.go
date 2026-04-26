@@ -6,6 +6,7 @@ const (
 	ActionClick ActionType = "click"
 	ActionMove  ActionType = "move"
 	ActionDelay ActionType = "delay"
+	ActionDrag  ActionType = "drag"
 )
 
 type MouseButton string
@@ -19,14 +20,44 @@ const (
 )
 
 // Action — единичный шаг макроса.
+//
+// Для type=drag: (X,Y) → (EndX,EndY) с зажатой Button за DurationMs.
+// Если DurationMs=0 — moment-drag (мгновенно перетянуть).
 type Action struct {
 	Type       ActionType  `json:"type"`
 	X          int         `json:"x,omitempty"`
 	Y          int         `json:"y,omitempty"`
+	EndX       int         `json:"end_x,omitempty"`
+	EndY       int         `json:"end_y,omitempty"`
 	Relative   bool        `json:"relative,omitempty"`
 	UseCurrent bool        `json:"use_current,omitempty"`
 	Button     MouseButton `json:"button,omitempty"`
 	DelayMs    int         `json:"delay_ms,omitempty"`
+	DurationMs int         `json:"duration_ms,omitempty"`
+}
+
+// Step — простой шаг для пошагового кликера: точка + кнопка.
+type Step struct {
+	X      int         `json:"x"`
+	Y      int         `json:"y"`
+	Button MouseButton `json:"button"`
+}
+
+// Sequence — последовательность кликов "по точкам".
+type Sequence struct {
+	Steps      []Step  `json:"steps"`
+	IntervalMs float64 `json:"interval_ms"` // задержка между шагами
+	Loops      int     `json:"loops"`       // 0 = бесконечно
+	Hotkey     string  `json:"hotkey"`
+}
+
+func DefaultSequence() Sequence {
+	return Sequence{
+		Steps:      []Step{},
+		IntervalMs: 200,
+		Loops:      0,
+		Hotkey:     "",
+	}
 }
 
 type Chain struct {
@@ -70,8 +101,19 @@ type Config struct {
 	Active        int            `json:"active"`
 	Chains        []Chain        `json:"chains"`
 	ActiveChain   int            `json:"active_chain"`
+	Sequence      Sequence       `json:"sequence"`
 	Theme         string         `json:"theme"`
 	AlwaysOnTop   bool           `json:"always_on_top"`
+
+	// Глобальное случайное смещение каждого клика на ±N пикселей.
+	// Для всех источников (Simple, Chain, Sequence). 0 = выкл.
+	ClickJitterPx int `json:"click_jitter_px"`
+
+	// Click-ping overlay: рисовать прозрачную вспышку в точке клика.
+	OverlayEnabled bool `json:"overlay_enabled"`
+
+	// Хоткей для пауза/возобновить (отдельный от пуск/стоп).
+	PauseHotkey string `json:"pause_hotkey"`
 
 	// Legacy: одиночный профиль из v1.0. На загрузке мигрируется в Profiles[0].
 	LegacySimple *SimpleConfig `json:"simple,omitempty"`
@@ -101,10 +143,13 @@ func DefaultProfile() SimpleConfig {
 
 func DefaultConfig() *Config {
 	return &Config{
-		Profiles: []SimpleConfig{DefaultProfile()},
-		Active:   0,
-		Chains:   []Chain{},
-		Theme:    "", // пусто = фронт сам подберёт по системной (auto)
+		Profiles:       []SimpleConfig{DefaultProfile()},
+		Active:         0,
+		Chains:         []Chain{},
+		Sequence:       DefaultSequence(),
+		Theme:          "", // пусто = фронт сам подберёт по системной (auto)
+		OverlayEnabled: true,
+		PauseHotkey:    "F8",
 	}
 }
 
@@ -130,6 +175,12 @@ func (c *Config) Migrate() {
 	}
 	if c.Chains == nil {
 		c.Chains = []Chain{}
+	}
+	if c.Sequence.Steps == nil {
+		c.Sequence = DefaultSequence()
+	}
+	if c.PauseHotkey == "" {
+		c.PauseHotkey = "F8"
 	}
 	// гарантируем имя у каждого профиля
 	for i := range c.Profiles {

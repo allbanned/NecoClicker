@@ -1,29 +1,40 @@
+import { useEffect, useState } from 'react'
 import { cn } from '@/lib/utils'
 import {
   Home, Layers3, FlaskConical, Palette, Settings as Cog,
-  Timer as TimerIcon, Shuffle, Pin, PinOff,
+  Timer as TimerIcon, Shuffle, Pin, PinOff, Footprints, Pause as PauseIcon,
 } from 'lucide-react'
 import { useEngine } from '@/components/engine-provider'
 import { useConfig } from '@/hooks/use-config'
 import { SetAlwaysOnTop } from '../../wailsjs/go/main/App'
+import { EventsOn, EventsOff } from '../../wailsjs/runtime/runtime'
 import necoUrl from '@/assets/neco.png'
 
-export type PageId = 'home' | 'macros' | 'timer' | 'jitter' | 'sandbox' | 'themes' | 'settings'
+export type PageId = 'home' | 'macros' | 'steps' | 'timer' | 'jitter' | 'sandbox' | 'themes' | 'settings'
 
 const NAV: { id: PageId; label: string; icon: React.ComponentType<{ className?: string }> }[] = [
-  { id: 'home',     label: 'Главная',     icon: Home },
-  { id: 'macros',   label: 'Макросы',     icon: Layers3 },
-  { id: 'timer',    label: 'Таймер',      icon: TimerIcon },
-  { id: 'jitter',   label: 'Хаос',        icon: Shuffle },
-  { id: 'sandbox',  label: 'Тест',        icon: FlaskConical },
-  { id: 'themes',   label: 'Темы',        icon: Palette },
-  { id: 'settings', label: 'Настройки',   icon: Cog },
+  { id: 'home',     label: 'Главная',   icon: Home },
+  { id: 'macros',   label: 'Макросы',   icon: Layers3 },
+  { id: 'steps',    label: 'По точкам', icon: Footprints },
+  { id: 'timer',    label: 'Таймер',    icon: TimerIcon },
+  { id: 'jitter',   label: 'Хаос',      icon: Shuffle },
+  { id: 'sandbox',  label: 'Тест',      icon: FlaskConical },
+  { id: 'themes',   label: 'Темы',      icon: Palette },
+  { id: 'settings', label: 'Настройки', icon: Cog },
 ]
 
 export function AppSidebar({ page, setPage }: { page: PageId; setPage: (p: PageId) => void }) {
   const { running } = useEngine()
   const { cfg, reload } = useConfig()
   const onTop = !!cfg?.always_on_top
+
+  const [paused, setPaused] = useState(false)
+  useEffect(() => {
+    EventsOn('engine:paused', (v: boolean) => setPaused(!!v))
+    return () => EventsOff('engine:paused')
+  }, [])
+  // Сбрасываем paused когда движок останавливается
+  useEffect(() => { if (!running) setPaused(false) }, [running])
 
   const togglePin = async () => {
     await SetAlwaysOnTop(!onTop)
@@ -35,13 +46,13 @@ export function AppSidebar({ page, setPage }: { page: PageId; setPage: (p: PageI
       <div className="flex items-center gap-3 px-4 pb-3 pt-5">
         <div className={cn(
           'relative h-12 w-12 shrink-0 overflow-hidden rounded-xl border border-border bg-background',
-          running && 'animate-pulse-glow'
+          running && !paused && 'animate-pulse-glow'
         )}>
           <img src={necoUrl} alt="Neco" className="h-full w-full object-cover" />
         </div>
         <div className="flex flex-col">
           <span className="text-base font-bold tracking-tight text-glow">NecoClicker</span>
-          <span className="text-[10px] uppercase tracking-widest text-muted-foreground">v1.3</span>
+          <span className="text-[10px] uppercase tracking-widest text-muted-foreground">v1.4</span>
         </div>
       </div>
 
@@ -86,14 +97,22 @@ export function AppSidebar({ page, setPage }: { page: PageId; setPage: (p: PageI
 
         <div className={cn(
           'flex items-center gap-2 rounded-lg border border-border bg-background/60 px-3 py-2 text-xs',
-          running && 'border-primary/50'
+          paused && 'border-yellow-500/60',
+          running && !paused && 'border-primary/50',
         )}>
+          {paused ? (
+            <PauseIcon className="h-3 w-3 text-yellow-500" />
+          ) : (
+            <span className={cn(
+              'h-2 w-2 rounded-full',
+              running ? 'bg-primary glow-primary animate-pulse' : 'bg-muted-foreground/40'
+            )} />
+          )}
           <span className={cn(
-            'h-2 w-2 rounded-full',
-            running ? 'bg-primary glow-primary animate-pulse' : 'bg-muted-foreground/40'
-          )} />
-          <span className={running ? 'text-primary font-semibold' : 'text-muted-foreground'}>
-            {running ? 'Активен' : 'Остановлен'}
+            paused ? 'text-yellow-500 font-semibold'
+              : running ? 'text-primary font-semibold' : 'text-muted-foreground'
+          )}>
+            {paused ? 'Пауза' : running ? 'Активен' : 'Остановлен'}
           </span>
         </div>
       </div>

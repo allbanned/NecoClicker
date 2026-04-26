@@ -1,6 +1,6 @@
 // Package engine выполняет кликер и цепочки в фоновых goroutine'ах
-// с безопасной отменой через context, опциональными лимитами
-// (длительность / число кликов) и рандомизацией интервала.
+// с безопасной отменой через context, опциональными лимитами,
+// jitter'ом, паузой и опциональным click-ping overlay'ем.
 package engine
 
 import (
@@ -16,6 +16,11 @@ import (
 )
 
 type Logger func(string)
+
+// Pinger — наблюдатель кликов (для overlay).
+type Pinger interface {
+	Ping(x, y int)
+}
 
 type CPSReport struct {
 	CPS   float64 `json:"cps"`
@@ -35,6 +40,18 @@ type Engine struct {
 
 	clickCount atomic.Uint64
 	cpsCancel  context.CancelFunc
+
+	// pause/resume — атомарный флаг
+	paused atomic.Bool
+
+	// глобальное смещение клика ±N px (применяется ко всем источникам)
+	clickJitterPx atomic.Int32
+
+	// pinger опционален; если nil — overlay не используется
+	pinger Pinger
+
+	rng     *rand.Rand
+	rngOnce sync.Once
 }
 
 func New(log Logger) *Engine {
@@ -42,6 +59,21 @@ func New(log Logger) *Engine {
 		log = func(string) {}
 	}
 	return &Engine{log: log}
+}
+
+// SetPinger — назначить overlay-callback на каждый клик.
+func (e *Engine) SetPinger(p Pinger) {
+	e.mu.Lock()
+	e.pinger = p
+	e.mu.Unlock()
+}
+
+// SetClickJitterPx — глобальный random offset ±N px.
+func (e *Engine) SetClickJitterPx(n int) {
+	if n < 0 {
+		n = 0
+	}
+	e.clickJitterPx.Store(int32(n))
 }
 
 func (e *Engine) IsRunning() bool {
@@ -62,6 +94,47 @@ func (e *Engine) SetDryRun(v bool) {
 	e.mu.Unlock()
 }
 
+// ---- pause / resume --------------------------------------------------------
+
+func (e *Engine) IsPaused() bool { return e.paused.Load() }
+
+// Pause замораживает движок: следующий fire не выполнится пока не Resume.
+func (e *Engine) Pause() {
+	if !e.IsRunning() {
+		return
+	}
+	if e.paused.CompareAndSwap(false, true) {
+		e.log("Paused")
+	}
+}
+
+func (e *Engine) Resume() {
+	if e.paused.CompareAndSwap(true, false) {
+		e.log("Resumed")
+	}
+}
+
+// TogglePause — для глобального хоткея пауза/продолжить.
+func (e *Engine) TogglePause() {
+	if e.paused.Load() {
+		e.Resume()
+	} else {
+		e.Pause()
+	}
+}
+
+// waitWhilePaused блокирует пока есть пауза, прерываясь на ctx.Done.
+func (e *Engine) waitWhilePaused(ctx context.Context) bool {
+	for e.paused.Load() {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return ctx.Err() == nil
+}
+
 func (e *Engine) OnStateChange(fn func(bool)) {
 	e.mu.Lock()
 	e.listeners = append(e.listeners, fn)
@@ -71,6 +144,10 @@ func (e *Engine) OnStateChange(fn func(bool)) {
 func (e *Engine) emit(running bool) {
 	e.mu.Lock()
 	e.running = running
+	if !running {
+		// при остановке всегда выходим из паузы
+		e.paused.Store(false)
+	}
 	ls := append([]func(bool){}, e.listeners...)
 	e.mu.Unlock()
 	for _, fn := range ls {
@@ -86,6 +163,7 @@ func (e *Engine) Stop() {
 	if c != nil {
 		c()
 	}
+	e.paused.Store(false)
 	e.wg.Wait()
 }
 
@@ -115,7 +193,7 @@ func (e *Engine) finish() {
 
 // ---- click counting ---------------------------------------------------------
 
-func (e *Engine) ResetClicks()      { e.clickCount.Store(0) }
+func (e *Engine) ResetClicks()        { e.clickCount.Store(0) }
 func (e *Engine) TotalClicks() uint64 { return e.clickCount.Load() }
 
 func (e *Engine) StartCPSReporter(parent context.Context, cb CPSCallback) {
@@ -174,14 +252,51 @@ func (e *Engine) StopCPSReporter() {
 	}
 }
 
-// doClick — единая точка отправки клика: инкрементит счётчик и в нужном
-// режиме либо реально кликает, либо только пишет лог.
+// ---- helpers ----------------------------------------------------------------
+
+func (e *Engine) ensureRng() {
+	e.rngOnce.Do(func() {
+		e.rng = rand.New(rand.NewSource(time.Now().UnixNano()))
+	})
+}
+
+// jitterPos возвращает (x,y) с добавленным глобальным jitter'ом ±N px.
+func (e *Engine) jitterPos(x, y int) (int, int) {
+	n := int(e.clickJitterPx.Load())
+	if n <= 0 {
+		return x, y
+	}
+	e.ensureRng()
+	return x + e.rng.Intn(2*n+1) - n, y + e.rng.Intn(2*n+1) - n
+}
+
+// doClick — единая точка отправки клика: jitter, инкремент, overlay-ping
+// и (в реальном режиме) реальный SendInput.
 func (e *Engine) doClick(button string, x, y int, useCurrent bool) {
 	e.clickCount.Add(1)
-	if e.IsDryRun() {
-		return
+
+	// если useCurrent — берём текущую позицию для overlay (и jitter не применяем)
+	var px, py int
+	if useCurrent {
+		px, py = winmouse.GetCursor()
+	} else {
+		px, py = e.jitterPos(x, y)
 	}
-	winmouse.Click(button, x, y, useCurrent)
+
+	if !e.IsDryRun() {
+		if useCurrent {
+			winmouse.Click(button, 0, 0, true)
+		} else {
+			winmouse.Click(button, px, py, false)
+		}
+	}
+
+	e.mu.Lock()
+	p := e.pinger
+	e.mu.Unlock()
+	if p != nil {
+		p.Ping(px, py)
+	}
 }
 
 // ---- runners ----------------------------------------------------------------
@@ -190,7 +305,6 @@ func (e *Engine) RunSimple(cfg macro.SimpleConfig) {
 	e.RunSimpleLimited(cfg, macro.RunLimits{})
 }
 
-// RunSimpleLimited — кликер с опциональными лимитами и jitter'ом.
 func (e *Engine) RunSimpleLimited(cfg macro.SimpleConfig, lim macro.RunLimits) {
 	ctx := e.start()
 	go func() {
@@ -215,8 +329,6 @@ func (e *Engine) RunSimpleLimited(cfg macro.SimpleConfig, lim macro.RunLimits) {
 		}
 		e.log(desc)
 
-		// Лимит по времени реализуем как отдельный таймер,
-		// который отменяет ctx; счётчик кликов проверяем после каждого fire'а.
 		var deadlineCancel context.CancelFunc
 		if lim.DurationSec > 0 {
 			ctx, deadlineCancel = context.WithTimeout(ctx, time.Duration(lim.DurationSec)*time.Second)
@@ -224,7 +336,7 @@ func (e *Engine) RunSimpleLimited(cfg macro.SimpleConfig, lim macro.RunLimits) {
 		}
 
 		startTotal := e.clickCount.Load()
-		rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+		e.ensureRng()
 
 		fire := func() {
 			if e.IsDryRun() {
@@ -237,20 +349,17 @@ func (e *Engine) RunSimpleLimited(cfg macro.SimpleConfig, lim macro.RunLimits) {
 			e.doClick(btn, cfg.X, cfg.Y, cfg.UseCurrent)
 		}
 
-		// Лимит по кликам относительно текущего значения счётчика
 		clicksDone := func() bool {
 			if lim.MaxClicks == 0 {
 				return false
 			}
-			done := e.clickCount.Load() - startTotal
-			return done >= lim.MaxClicks
+			return e.clickCount.Load()-startTotal >= lim.MaxClicks
 		}
 
 		nextDelay := func() time.Duration {
 			d := ms
 			if lim.JitterMs > 0 {
-				// рандомное смещение в [-J/2, +J/2]
-				d += (rng.Float64() - 0.5) * lim.JitterMs
+				d += (e.rng.Float64() - 0.5) * lim.JitterMs
 				if d < 0 {
 					d = 0
 				}
@@ -265,11 +374,16 @@ func (e *Engine) RunSimpleLimited(cfg macro.SimpleConfig, lim macro.RunLimits) {
 					e.log("Simple stopped")
 					return
 				}
+				if !e.waitWhilePaused(ctx) {
+					return
+				}
 				fire()
 			}
 		}
 
-		// Обычный путь: select+After (резолюция ~OS scheduler tick)
+		if !e.waitWhilePaused(ctx) {
+			return
+		}
 		fire()
 		if clicksDone() {
 			e.log("Simple stopped (max clicks)")
@@ -282,6 +396,9 @@ func (e *Engine) RunSimpleLimited(cfg macro.SimpleConfig, lim macro.RunLimits) {
 				e.log("Simple stopped")
 				return
 			case <-time.After(d):
+				if !e.waitWhilePaused(ctx) {
+					return
+				}
 				fire()
 				if clicksDone() {
 					e.log("Simple stopped (max clicks)")
@@ -289,6 +406,64 @@ func (e *Engine) RunSimpleLimited(cfg macro.SimpleConfig, lim macro.RunLimits) {
 				}
 			}
 		}
+	}()
+}
+
+// RunSequence — пошаговый кликер: проходит по seq.Steps, кликая в каждой
+// точке с задержкой seq.IntervalMs между шагами. seq.Loops=0 → бесконечно.
+func (e *Engine) RunSequence(seq macro.Sequence) {
+	if len(seq.Steps) == 0 {
+		return
+	}
+	ctx := e.start()
+	go func() {
+		defer e.finish()
+		e.log(fmt.Sprintf("Sequence started: %d steps, interval=%gms, loops=%d",
+			len(seq.Steps), seq.IntervalMs, seq.Loops))
+
+		ms := seq.IntervalMs
+		if ms < 0 {
+			ms = 0
+		}
+		d := time.Duration(ms * float64(time.Millisecond))
+
+		infinite := seq.Loops <= 0
+		for i := 0; infinite || i < seq.Loops; i++ {
+			for idx, s := range seq.Steps {
+				if ctx.Err() != nil {
+					e.log("Sequence stopped")
+					return
+				}
+				if !e.waitWhilePaused(ctx) {
+					return
+				}
+				btn := string(s.Button)
+				if btn == "" {
+					btn = "left"
+				}
+				if e.IsDryRun() {
+					e.log(fmt.Sprintf("[%d][dry] step %s (%d,%d)", idx+1, btn, s.X, s.Y))
+				} else {
+					e.log(fmt.Sprintf("[%d] step %s (%d,%d)", idx+1, btn, s.X, s.Y))
+				}
+				e.doClick(btn, s.X, s.Y, false)
+
+				// задержка после шага (последний шаг последней итерации можно не ждать)
+				lastStep := idx == len(seq.Steps)-1
+				lastLoop := !infinite && i == seq.Loops-1
+				if lastStep && lastLoop {
+					break
+				}
+				if d > 0 {
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(d):
+					}
+				}
+			}
+		}
+		e.log("Sequence done")
 	}()
 }
 
@@ -302,6 +477,9 @@ func (e *Engine) RunChain(chain macro.Chain) {
 			for idx, a := range chain.Actions {
 				if ctx.Err() != nil {
 					e.log("Chain stopped")
+					return
+				}
+				if !e.waitWhilePaused(ctx) {
 					return
 				}
 				if !e.executeAction(ctx, a, idx) {
@@ -348,6 +526,53 @@ func (e *Engine) executeAction(ctx context.Context, a macro.Action, idx int) boo
 			winmouse.SetCursor(x, y)
 			e.log(fmt.Sprintf("[%d] move (%d,%d)", idx, x, y))
 		}
+
+	case macro.ActionDrag:
+		btn := string(a.Button)
+		if btn == "" {
+			btn = "left"
+		}
+		startX, startY := a.X, a.Y
+		endX, endY := a.EndX, a.EndY
+		if a.Relative {
+			cx, cy := winmouse.GetCursor()
+			startX, startY = cx+a.X, cy+a.Y
+			endX, endY = cx+a.EndX, cy+a.EndY
+		}
+		dur := time.Duration(a.DurationMs) * time.Millisecond
+		if dry {
+			e.log(fmt.Sprintf("[%d][dry] drag %s (%d,%d)→(%d,%d) %v", idx, btn, startX, startY, endX, endY, dur))
+		} else {
+			e.log(fmt.Sprintf("[%d] drag %s (%d,%d)→(%d,%d) %v", idx, btn, startX, startY, endX, endY, dur))
+			winmouse.SetCursor(startX, startY)
+			winmouse.MouseDown(btn)
+			// плавное движение в N шагов
+			steps := int(dur / (10 * time.Millisecond))
+			if steps < 1 {
+				steps = 1
+			}
+			for i := 1; i <= steps; i++ {
+				if ctx.Err() != nil {
+					winmouse.MouseUp(btn)
+					return false
+				}
+				t := float64(i) / float64(steps)
+				x := startX + int(float64(endX-startX)*t)
+				y := startY + int(float64(endY-startY)*t)
+				winmouse.SetCursor(x, y)
+				if steps > 1 {
+					time.Sleep(dur / time.Duration(steps))
+				}
+			}
+			winmouse.MouseUp(btn)
+			e.mu.Lock()
+			p := e.pinger
+			e.mu.Unlock()
+			if p != nil {
+				p.Ping(endX, endY)
+			}
+		}
+		e.clickCount.Add(1)
 
 	case macro.ActionDelay:
 		d := time.Duration(a.DelayMs) * time.Millisecond

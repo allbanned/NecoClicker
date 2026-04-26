@@ -6,6 +6,7 @@ import { AppSidebar, type PageId } from '@/components/app-sidebar'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { HomePage } from '@/pages/home'
 import { MacrosPage } from '@/pages/macros'
+import { StepsPage } from '@/pages/steps'
 import { TimerPage } from '@/pages/timer'
 import { JitterPage } from '@/pages/jitter'
 import { SandboxPage } from '@/pages/sandbox'
@@ -28,6 +29,7 @@ function Shell({ initialTheme }: { initialTheme: ThemeId }) {
             </header>
             {page === 'home' && <HomePage />}
             {page === 'macros' && <MacrosPage />}
+            {page === 'steps' && <StepsPage />}
             {page === 'timer' && <TimerPage />}
             {page === 'jitter' && <JitterPage />}
             {page === 'sandbox' && <SandboxPage />}
@@ -46,6 +48,7 @@ function labelFor(p: PageId): string {
   switch (p) {
     case 'home': return 'Главная'
     case 'macros': return 'Редактор макросов'
+    case 'steps': return 'Пошаговый кликер'
     case 'timer': return 'Кликер с таймером'
     case 'jitter': return 'Хаотичный кликер'
     case 'sandbox': return 'Тест и логи'

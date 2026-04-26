@@ -6,7 +6,7 @@ import { Label } from '@/components/ui/label'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { Plus, Trash2, ChevronUp, ChevronDown, Play, Square, Crosshair, MousePointerClick, Move, Timer, Star } from 'lucide-react'
+import { Plus, Trash2, ChevronUp, ChevronDown, Play, Square, Crosshair, MousePointerClick, Move, Timer, Star, MousePointer2 } from 'lucide-react'
 import { useConfig } from '@/hooks/use-config'
 import { useEngine } from '@/components/engine-provider'
 import { useConfirm } from '@/components/confirm-dialog'
@@ -16,14 +16,19 @@ import { macro } from '../../wailsjs/go/models'
 import { cn } from '@/lib/utils'
 
 type Action = macro.Action
+type ActionKind = 'click' | 'delay' | 'move' | 'drag'
 
-function newAction(type: 'click' | 'delay' | 'move'): Action {
+function newAction(type: ActionKind): Action {
   const a = new macro.Action({ type })
   if (type === 'click') {
     a.button = 'left'
     a.use_current = true
   }
   if (type === 'delay') a.delay_ms = 100
+  if (type === 'drag') {
+    a.button = 'left'
+    a.duration_ms = 300
+  }
   return a
 }
 
@@ -108,7 +113,7 @@ export function MacrosPage() {
       return next
     })
   }
-  const addAction = (type: 'click' | 'delay' | 'move') => {
+  const addAction = (type: ActionKind) => {
     setActions((prev) => {
       const next = [...prev, newAction(type)]
       persist({}, next)
@@ -201,6 +206,7 @@ export function MacrosPage() {
             <Button size="sm" variant="outline" onClick={() => addAction('click')}><MousePointerClick className="h-3.5 w-3.5" /> Клик</Button>
             <Button size="sm" variant="outline" onClick={() => addAction('delay')}><Timer className="h-3.5 w-3.5" /> Задержка</Button>
             <Button size="sm" variant="outline" onClick={() => addAction('move')}><Move className="h-3.5 w-3.5" /> Перемещение</Button>
+            <Button size="sm" variant="outline" onClick={() => addAction('drag')}><MousePointer2 className="h-3.5 w-3.5" /> Drag</Button>
           </div>
 
           <ScrollArea className="flex-1 px-5 pb-5">
@@ -323,6 +329,58 @@ function ActionRow({ index, action, onChange, onMove, onRemove, onCapture }: {
             <Button size="sm" variant="outline" onClick={onCapture} className="w-full"><Crosshair className="h-3.5 w-3.5" /> Захватить</Button>
           </div>
           <div className="col-span-full">
+            <label className="flex items-center gap-2 text-xs">
+              <Switch checked={!!action.relative} onCheckedChange={(v) => onChange({ relative: v })} />
+              Относительно курсора
+            </label>
+          </div>
+        </div>
+      )}
+
+      {action.type === 'drag' && (
+        <div className="grid gap-2 sm:grid-cols-2">
+          <div className="space-y-1">
+            <Label>Кнопка</Label>
+            <Select value={action.button || 'left'} onValueChange={(v) => onChange({ button: v })}>
+              <SelectTrigger><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="left">ЛКМ</SelectItem>
+                <SelectItem value="right">ПКМ</SelectItem>
+                <SelectItem value="middle">СКМ</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
+          <div className="space-y-1">
+            <Label>Длительность (мс)</Label>
+            <Input type="number" min="0" value={action.duration_ms ?? 0} onChange={(e) => onChange({ duration_ms: parseInt(e.target.value) || 0 })} />
+          </div>
+          <div className="space-y-1">
+            <Label>Старт X</Label>
+            <Input type="number" value={action.x ?? 0} onChange={(e) => onChange({ x: parseInt(e.target.value) || 0 })} />
+          </div>
+          <div className="space-y-1">
+            <Label>Старт Y</Label>
+            <Input type="number" value={action.y ?? 0} onChange={(e) => onChange({ y: parseInt(e.target.value) || 0 })} />
+          </div>
+          <div className="space-y-1">
+            <Label>Конец X</Label>
+            <Input type="number" value={action.end_x ?? 0} onChange={(e) => onChange({ end_x: parseInt(e.target.value) || 0 })} />
+          </div>
+          <div className="space-y-1">
+            <Label>Конец Y</Label>
+            <Input type="number" value={action.end_y ?? 0} onChange={(e) => onChange({ end_y: parseInt(e.target.value) || 0 })} />
+          </div>
+          <div className="col-span-full flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="outline" onClick={async () => {
+              const { CursorPos } = await import('../../wailsjs/go/main/App')
+              const [x, y] = await CursorPos()
+              onChange({ x, y } as any)
+            }}><Crosshair className="h-3.5 w-3.5" /> Захватить старт</Button>
+            <Button size="sm" variant="outline" onClick={async () => {
+              const { CursorPos } = await import('../../wailsjs/go/main/App')
+              const [x, y] = await CursorPos()
+              onChange({ end_x: x, end_y: y } as any)
+            }}><Crosshair className="h-3.5 w-3.5" /> Захватить конец</Button>
             <label className="flex items-center gap-2 text-xs">
               <Switch checked={!!action.relative} onCheckedChange={(v) => onChange({ relative: v })} />
               Относительно курсора

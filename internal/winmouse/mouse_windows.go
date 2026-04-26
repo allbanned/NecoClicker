@@ -105,3 +105,15 @@ func Click(button string, x, y int, useCurrent bool) {
 		{Type: inputMouse, Mi: mouseInput{DwFlags: up, MouseData: data}},
 	})
 }
+
+// MouseDown — нажать (без отпускания).
+func MouseDown(button string) {
+	down, _, data := flagsFor(button)
+	sendInputs([]input{{Type: inputMouse, Mi: mouseInput{DwFlags: down, MouseData: data}}})
+}
+
+// MouseUp — отпустить.
+func MouseUp(button string) {
+	_, up, data := flagsFor(button)
+	sendInputs([]input{{Type: inputMouse, Mi: mouseInput{DwFlags: up, MouseData: data}}})
+}
