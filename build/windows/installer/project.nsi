@@ -81,9 +81,11 @@ FunctionEnd
 
 # Прибиваем запущенный NecoClicker.exe перед перезаписью.
 # Без этого NSIS падает с "Error opening file for writing".
+# nsExec::Exec используется вместо ExecToLog, чтобы вывод taskkill (cp866)
+# не попадал в лог NSIS как кракозябры.
 !macro KillRunningApp
     DetailPrint "Stopping any running ${PRODUCT_EXECUTABLE}..."
-    nsExec::ExecToLog 'taskkill /F /IM "${PRODUCT_EXECUTABLE}"'
+    nsExec::Exec 'taskkill /F /IM "${PRODUCT_EXECUTABLE}"'
     Pop $0
     # ждём ~1.5с чтобы ОС освободила handle файла
     Sleep 1500
