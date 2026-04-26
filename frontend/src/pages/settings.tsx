@@ -182,7 +182,7 @@ export function SettingsPage() {
           <div className="flex items-center gap-4">
             <img src={necoUrl} alt="" className="h-20 w-20 rounded-xl border border-border object-cover" />
             <div className="space-y-1 text-sm">
-              <div className="text-base font-semibold">NecoClicker <span className="text-muted-foreground">v1.6.2</span></div>
+              <div className="text-base font-semibold">NecoClicker <span className="text-muted-foreground">v1.6.3</span></div>
               <div className="text-xs text-muted-foreground">
                 Лёгкий автокликер с глобальными хоткеями и редактором макросов.<br />
                 Go · Wails · React · Tailwind.
