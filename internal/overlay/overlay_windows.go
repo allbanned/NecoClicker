@@ -1,10 +1,14 @@
 //go:build windows
 
 // Package overlay рисует click-ping — прозрачные кружки в точках клика.
-// Реализовано как одно полноэкранное layered-окно WS_EX_LAYERED |
-// WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW. Клики проходят
-// насквозь, окно не появляется в Alt-Tab и таскбаре. Перерисовывается
-// по таймеру пока есть активные пинги.
+//
+// Реализация: одно полноэкранное layered click-through topmost окно.
+// Клики проходят насквозь, окно не появляется в Alt-Tab и таскбаре.
+//
+// Производительность: DIB section и memory DC создаются ОДИН РАЗ при Start
+// и переиспользуются. Рендер идёт ТОЛЬКО когда есть активные пинги — в
+// idle движок overlay ничего не делает (нет flush'а UpdateLayeredWindow).
+// Это убирает фоновую нагрузку на GDI/CPU при выключенных кликах.
 package overlay
 
 import (
@@ -20,26 +24,23 @@ var (
 	gdi32    = syscall.NewLazyDLL("gdi32.dll")
 	kernel32 = syscall.NewLazyDLL("kernel32.dll")
 
-	procRegisterClassExW          = user32.NewProc("RegisterClassExW")
-	procCreateWindowExW           = user32.NewProc("CreateWindowExW")
-	procDestroyWindow             = user32.NewProc("DestroyWindow")
-	procShowWindow                = user32.NewProc("ShowWindow")
-	procUpdateLayeredWindow       = user32.NewProc("UpdateLayeredWindow")
-	procGetMessageW               = user32.NewProc("GetMessageW")
-	procPostThreadMessageW        = user32.NewProc("PostThreadMessageW")
-	procDefWindowProcW            = user32.NewProc("DefWindowProcW")
-	procGetSystemMetrics          = user32.NewProc("GetSystemMetrics")
-	procSetWindowPos              = user32.NewProc("SetWindowPos")
-	procInvalidateRect            = user32.NewProc("InvalidateRect")
-	procGetDC                     = user32.NewProc("GetDC")
-	procReleaseDC                 = user32.NewProc("ReleaseDC")
-	procCreateCompatibleDC        = gdi32.NewProc("CreateCompatibleDC")
-	procDeleteDC                  = gdi32.NewProc("DeleteDC")
-	procCreateDIBSection          = gdi32.NewProc("CreateDIBSection")
-	procSelectObject              = gdi32.NewProc("SelectObject")
-	procDeleteObject              = gdi32.NewProc("DeleteObject")
-	procGetCurrentThreadId        = kernel32.NewProc("GetCurrentThreadId")
-	procGetModuleHandleW          = kernel32.NewProc("GetModuleHandleW")
+	procRegisterClassExW    = user32.NewProc("RegisterClassExW")
+	procCreateWindowExW     = user32.NewProc("CreateWindowExW")
+	procDestroyWindow       = user32.NewProc("DestroyWindow")
+	procShowWindow          = user32.NewProc("ShowWindow")
+	procUpdateLayeredWindow = user32.NewProc("UpdateLayeredWindow")
+	procDefWindowProcW      = user32.NewProc("DefWindowProcW")
+	procGetSystemMetrics    = user32.NewProc("GetSystemMetrics")
+	procSetWindowPos        = user32.NewProc("SetWindowPos")
+	procGetDC               = user32.NewProc("GetDC")
+	procReleaseDC           = user32.NewProc("ReleaseDC")
+	procCreateCompatibleDC  = gdi32.NewProc("CreateCompatibleDC")
+	procDeleteDC            = gdi32.NewProc("DeleteDC")
+	procCreateDIBSection    = gdi32.NewProc("CreateDIBSection")
+	procSelectObject        = gdi32.NewProc("SelectObject")
+	procDeleteObject        = gdi32.NewProc("DeleteObject")
+	procGetCurrentThreadId  = kernel32.NewProc("GetCurrentThreadId")
+	procGetModuleHandleW    = kernel32.NewProc("GetModuleHandleW")
 )
 
 const (
@@ -52,7 +53,6 @@ const (
 	wsPopup = 0x80000000
 
 	swShowNoActivate = 4
-	swHide           = 0
 
 	smCxScreen        = 0
 	smCyScreen        = 1
@@ -61,16 +61,15 @@ const (
 	smCxVirtualScreen = 78
 	smCyVirtualScreen = 79
 
-	wmQuit  = 0x0012
-	wmTimer = 0x0113
-
-	hwndTopmost  = ^uintptr(0) // -1
+	hwndTopmost   = ^uintptr(0) // -1
 	swpNoActivate = 0x0010
 	swpShowWindow = 0x0040
+	swpNoMove     = 0x0002
+	swpNoSize     = 0x0001
 
-	// CreateDIBSection
-	biRGB         = 0
-	dibRgbColors  = 0
+	biRGB        = 0
+	dibRgbColors = 0
+	ulwAlpha     = 0x00000002
 )
 
 type wndClassExW struct {
@@ -88,7 +87,6 @@ type wndClassExW struct {
 	hIconSm       uintptr
 }
 
-type rect struct{ Left, Top, Right, Bottom int32 }
 type point struct{ X, Y int32 }
 type size struct{ Cx, Cy int32 }
 
@@ -118,17 +116,6 @@ type bitmapInfo struct {
 	BmiColors [1]uint32
 }
 
-type winMsg struct {
-	Hwnd     uintptr
-	Message  uint32
-	_        uint32
-	WParam   uintptr
-	LParam   uintptr
-	Time     uint32
-	X, Y     int32
-	LPrivate uint32
-}
-
 type ping struct {
 	X, Y    int32
 	Started time.Time
@@ -136,32 +123,45 @@ type ping struct {
 
 const (
 	pingDuration = 350 * time.Millisecond
-	maxRadius    = 36 // максимальный радиус кружка
+	maxRadius    = 36
 	pingsCap     = 32
+	tickInterval = 33 * time.Millisecond // ~30 fps
 )
 
 type Overlay struct {
 	hwnd     uintptr
-	threadID uint32
-	stopped  chan struct{}
+	hScreen  uintptr // device context экрана (кэш)
+	hMem     uintptr // memory DC (кэш)
+	hBmp     uintptr // DIB section (кэш)
+	bits     unsafe.Pointer
 
-	// virtual screen rect (multi-monitor)
+	// virtual screen rect
 	vx, vy, vw, vh int32
 
 	mu      sync.Mutex
 	pings   []ping
 	enabled atomic.Bool
 
-	// двойной буфер: ARGB пиксели для UpdateLayeredWindow
+	// pixel buffer — указывает на bits, не отдельный slice
 	pixels []uint32
 
-	// первичный цвет (HSL primary темы) — задаётся снаружи
-	r, g, b atomic.Uint32 // 0..255 packed in low bits
+	// чтобы знать, нужно ли стирать прошлый кадр
+	hadFrame bool
+
+	stopCh    chan struct{}
+	stoppedCh chan struct{}
+	started   atomic.Bool
+
+	// цвет вспышки (R,G,B) — задаётся снаружи
+	r, g, b atomic.Uint32
 }
 
 func New() *Overlay {
-	o := &Overlay{stopped: make(chan struct{})}
-	o.SetColor(255, 35, 80) // дефолт — алый/розовый
+	o := &Overlay{
+		stopCh:    make(chan struct{}),
+		stoppedCh: make(chan struct{}),
+	}
+	o.SetColor(255, 35, 80)
 	o.enabled.Store(true)
 	return o
 }
@@ -175,9 +175,8 @@ func (o *Overlay) SetColor(r, g, b byte) {
 	o.b.Store(uint32(b))
 }
 
-// Ping — добавить вспышку в (X,Y) экранных координатах.
 func (o *Overlay) Ping(x, y int) {
-	if !o.enabled.Load() {
+	if !o.enabled.Load() || !o.started.Load() {
 		return
 	}
 	o.mu.Lock()
@@ -193,16 +192,12 @@ func getSysMetric(idx uintptr) int32 {
 	return int32(r)
 }
 
-// Start запускает overlay-окно в отдельной OS-thread.
 func (o *Overlay) Start() error {
+	if !o.started.CompareAndSwap(false, true) {
+		return nil
+	}
 	started := make(chan error, 1)
 	go func() {
-		// thread будет жить до Stop — без UnlockOSThread
-		// runtime.LockOSThread() // не обязательно для overlay; добавим если будут проблемы
-
-		tid, _, _ := procGetCurrentThreadId.Call()
-		o.threadID = uint32(tid)
-
 		hInst, _, _ := procGetModuleHandleW.Call(0)
 
 		className, _ := syscall.UTF16PtrFromString("NecoClickerOverlay")
@@ -222,7 +217,7 @@ func (o *Overlay) Start() error {
 		atom, _, err := procRegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 		if atom == 0 {
 			started <- err
-			close(o.stopped)
+			close(o.stoppedCh)
 			return
 		}
 
@@ -250,32 +245,67 @@ func (o *Overlay) Start() error {
 		)
 		if hwnd == 0 {
 			started <- err
-			close(o.stopped)
+			close(o.stoppedCh)
 			return
 		}
 		o.hwnd = hwnd
 
-		o.pixels = make([]uint32, int(o.vw)*int(o.vh))
+		// КЭШ DIB и memory DC — создаём один раз
+		o.hScreen, _, _ = procGetDC.Call(0)
+		o.hMem, _, _ = procCreateCompatibleDC.Call(o.hScreen)
+
+		bi := bitmapInfo{}
+		bi.BmiHeader.BiSize = uint32(unsafe.Sizeof(bi.BmiHeader))
+		bi.BmiHeader.BiWidth = o.vw
+		bi.BmiHeader.BiHeight = -o.vh // top-down
+		bi.BmiHeader.BiPlanes = 1
+		bi.BmiHeader.BiBitCount = 32
+		bi.BmiHeader.BiCompression = biRGB
+
+		var bits unsafe.Pointer
+		hBmp, _, _ := procCreateDIBSection.Call(
+			o.hMem,
+			uintptr(unsafe.Pointer(&bi)),
+			uintptr(dibRgbColors),
+			uintptr(unsafe.Pointer(&bits)),
+			0, 0,
+		)
+		if hBmp == 0 || bits == nil {
+			procDestroyWindow.Call(o.hwnd)
+			started <- err
+			close(o.stoppedCh)
+			return
+		}
+		o.hBmp = hBmp
+		o.bits = bits
+		o.pixels = unsafe.Slice((*uint32)(bits), int(o.vw)*int(o.vh))
+		procSelectObject.Call(o.hMem, o.hBmp)
 
 		procShowWindow.Call(o.hwnd, swShowNoActivate)
-		// гарантируем topmost
-		procSetWindowPos.Call(o.hwnd, hwndTopmost, 0, 0, 0, 0, swpNoActivate|swpShowWindow|0x0001|0x0002) // NOMOVE|NOSIZE
+		procSetWindowPos.Call(o.hwnd, hwndTopmost, 0, 0, 0, 0,
+			swpNoActivate|swpShowWindow|swpNoMove|swpNoSize)
 
 		started <- nil
 
-		// рендер-цикл: 60fps пока есть пинги
-		ticker := time.NewTicker(16 * time.Millisecond)
+		ticker := time.NewTicker(tickInterval)
 		defer ticker.Stop()
 
 		for {
 			select {
 			case <-ticker.C:
-				if !o.tick() {
-					// нет пингов — продолжаем висеть, ждём
+				o.tick()
+			case <-o.stopCh:
+				if o.hBmp != 0 {
+					procDeleteObject.Call(o.hBmp)
 				}
-			case <-o.stopChannel():
+				if o.hMem != 0 {
+					procDeleteDC.Call(o.hMem)
+				}
+				if o.hScreen != 0 {
+					procReleaseDC.Call(0, o.hScreen)
+				}
 				procDestroyWindow.Call(o.hwnd)
-				close(o.stopped)
+				close(o.stoppedCh)
 				return
 			}
 		}
@@ -283,24 +313,18 @@ func (o *Overlay) Start() error {
 	return <-started
 }
 
-// stopChannel возвращает канал, который будет закрыт при Stop().
-// Реализован через nil-канал + flag. Упрощённо: используем quitCh.
-var quitCh = make(chan struct{})
-
-func (o *Overlay) stopChannel() <-chan struct{} { return quitCh }
-
 func (o *Overlay) Stop() {
-	select {
-	case <-quitCh:
-	default:
-		close(quitCh)
+	if !o.started.CompareAndSwap(true, false) {
+		return
 	}
-	<-o.stopped
+	close(o.stopCh)
+	<-o.stoppedCh
 }
 
-// tick фильтрует устаревшие пинги, рендерит активные, возвращает true
-// если пинги были.
-func (o *Overlay) tick() bool {
+// tick — главный цикл рендера. ВАЖНО: если активных пингов нет и в прошлом
+// кадре их тоже не было — не делает НИЧЕГО (никаких syscall'ов). Если они
+// были но устарели — один последний flush чтобы стереть. Иначе — рендер.
+func (o *Overlay) tick() {
 	o.mu.Lock()
 	now := time.Now()
 	alive := o.pings[:0]
@@ -314,55 +338,57 @@ func (o *Overlay) tick() bool {
 	o.mu.Unlock()
 
 	if len(pings) == 0 {
-		// если в прошлый кадр что-то рисовали — стереть
+		if !o.hadFrame {
+			return // idle — ничего не делаем
+		}
+		// стираем последний кадр
 		for i := range o.pixels {
 			o.pixels[i] = 0
 		}
 		o.flush()
-		return false
+		o.hadFrame = false
+		return
 	}
 
-	// очищаем буфер
-	for i := range o.pixels {
-		o.pixels[i] = 0
-	}
+	o.hadFrame = true
 
+	// Рендер: чистим только области под кружки + рисуем
 	cr := byte(o.r.Load())
 	cg := byte(o.g.Load())
 	cb := byte(o.b.Load())
 
+	// проще всего — clear+draw
+	for i := range o.pixels {
+		o.pixels[i] = 0
+	}
 	for _, p := range pings {
-		t := float64(now.Sub(p.Started)) / float64(pingDuration) // 0..1
+		t := float64(now.Sub(p.Started)) / float64(pingDuration)
 		if t < 0 {
 			t = 0
 		}
 		if t > 1 {
 			t = 1
 		}
-		// радиус растёт линейно; alpha убывает
-		radius := int32(float64(maxRadius) * t)
+		radius := int32(8 + float64(maxRadius-8)*t)
 		alpha := byte(255 * (1 - t))
-		o.drawCircle(p.X-o.vx, p.Y-o.vy, radius, cr, cg, cb, alpha)
+		o.drawCircleRing(p.X-o.vx, p.Y-o.vy, radius, 3, cr, cg, cb, alpha)
+		// центральная точка
+		o.drawCircleFilled(p.X-o.vx, p.Y-o.vy, 4, cr, cg, cb, byte(int(alpha)+30))
 	}
-
 	o.flush()
-	return true
 }
 
-// drawCircle — кольцо (анти-rastergraphics): рисуем заполненный круг с
-// premultiplied-alpha (требование UpdateLayeredWindow при ULW_ALPHA).
-func (o *Overlay) drawCircle(cx, cy, r int32, R, G, B, A byte) {
+// drawCircleFilled — закрашенный круг (premultiplied alpha).
+func (o *Overlay) drawCircleFilled(cx, cy, r int32, R, G, B, A byte) {
 	if r <= 0 || A == 0 {
 		return
 	}
-	// premultiplied
 	pr := uint32(R) * uint32(A) / 255
 	pg := uint32(G) * uint32(A) / 255
 	pb := uint32(B) * uint32(A) / 255
 	pix := (uint32(A) << 24) | (pr << 16) | (pg << 8) | pb
 
-	w := o.vw
-	h := o.vh
+	w, h := o.vw, o.vh
 	r2 := r * r
 	x0 := cx - r
 	if x0 < 0 {
@@ -393,42 +419,55 @@ func (o *Overlay) drawCircle(cx, cy, r int32, R, G, B, A byte) {
 	}
 }
 
-// flush обновляет layered-окно содержимым o.pixels через UpdateLayeredWindow.
-func (o *Overlay) flush() {
-	hScreen, _, _ := procGetDC.Call(0)
-	defer procReleaseDC.Call(0, hScreen)
-
-	hMem, _, _ := procCreateCompatibleDC.Call(hScreen)
-	defer procDeleteDC.Call(hMem)
-
-	bi := bitmapInfo{}
-	bi.BmiHeader.BiSize = uint32(unsafe.Sizeof(bi.BmiHeader))
-	bi.BmiHeader.BiWidth = o.vw
-	bi.BmiHeader.BiHeight = -o.vh // top-down
-	bi.BmiHeader.BiPlanes = 1
-	bi.BmiHeader.BiBitCount = 32
-	bi.BmiHeader.BiCompression = biRGB
-
-	var bits unsafe.Pointer
-	hBmp, _, _ := procCreateDIBSection.Call(
-		hMem,
-		uintptr(unsafe.Pointer(&bi)),
-		uintptr(dibRgbColors),
-		uintptr(unsafe.Pointer(&bits)),
-		0, 0,
-	)
-	if hBmp == 0 || bits == nil {
+// drawCircleRing — кольцо (между r-thickness и r).
+func (o *Overlay) drawCircleRing(cx, cy, r, thickness int32, R, G, B, A byte) {
+	if r <= 0 || A == 0 {
 		return
 	}
-	defer procDeleteObject.Call(hBmp)
+	pr := uint32(R) * uint32(A) / 255
+	pg := uint32(G) * uint32(A) / 255
+	pb := uint32(B) * uint32(A) / 255
+	pix := (uint32(A) << 24) | (pr << 16) | (pg << 8) | pb
 
-	// копируем наш буфер в DIB
-	dst := unsafe.Slice((*uint32)(bits), len(o.pixels))
-	copy(dst, o.pixels)
+	w, h := o.vw, o.vh
+	rOuter2 := r * r
+	rInner := r - thickness
+	if rInner < 1 {
+		rInner = 1
+	}
+	rInner2 := rInner * rInner
 
-	old, _, _ := procSelectObject.Call(hMem, hBmp)
-	defer procSelectObject.Call(hMem, old)
+	x0 := cx - r
+	if x0 < 0 {
+		x0 = 0
+	}
+	y0 := cy - r
+	if y0 < 0 {
+		y0 = 0
+	}
+	x1 := cx + r
+	if x1 >= w {
+		x1 = w - 1
+	}
+	y1 := cy + r
+	if y1 >= h {
+		y1 = h - 1
+	}
+	for y := y0; y <= y1; y++ {
+		dy := y - cy
+		dy2 := dy * dy
+		row := y * w
+		for x := x0; x <= x1; x++ {
+			dx := x - cx
+			d2 := dx*dx + dy2
+			if d2 <= rOuter2 && d2 >= rInner2 {
+				o.pixels[row+x] = pix
+			}
+		}
+	}
+}
 
+func (o *Overlay) flush() {
 	dstPos := point{X: o.vx, Y: o.vy}
 	srcPos := point{X: 0, Y: 0}
 	sz := size{Cx: o.vw, Cy: o.vh}
@@ -438,13 +477,12 @@ func (o *Overlay) flush() {
 		SourceConstantAlpha: 255,
 		AlphaFormat:         1, // AC_SRC_ALPHA
 	}
-	const ulwAlpha = 0x00000002
 	procUpdateLayeredWindow.Call(
 		o.hwnd,
-		hScreen,
+		o.hScreen,
 		uintptr(unsafe.Pointer(&dstPos)),
 		uintptr(unsafe.Pointer(&sz)),
-		hMem,
+		o.hMem,
 		uintptr(unsafe.Pointer(&srcPos)),
 		0,
 		uintptr(unsafe.Pointer(&blend)),
