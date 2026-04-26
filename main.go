@@ -20,7 +20,7 @@ func main() {
 	app := NewApp()
 
 	err := wails.Run(&options.App{
-		Title:             "NecoClicker v1.6.1",
+		Title:             "NecoClicker v1.6.2",
 		Width:             1100,
 		Height:            720,
 		MinWidth:          900,
@@ -28,7 +28,7 @@ func main() {
 		DisableResize:     false,
 		Frameless:         false,
 		StartHidden:       false,
-		HideWindowOnClose: true, // X сворачивает в трей; "Выйти" в трее реально выходит
+		HideWindowOnClose: false, // X = полный выход; кликер и хоткеи перестают работать
 		AssetServer: &assetserver.Options{
 			Assets: assets,
 		},
