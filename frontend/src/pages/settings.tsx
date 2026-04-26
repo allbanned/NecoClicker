@@ -18,7 +18,7 @@ import { useConfirm } from '@/components/confirm-dialog'
 import { HotkeyRecorder } from '@/components/hotkey-recorder'
 import necoUrl from '@/assets/neco.png'
 
-const GITHUB_URL = 'https://github.com/BarcaF1/NecoClicker'
+const GITHUB_URL = 'https://github.com/allbanned/NecoClicker'
 const AUTHOR = 'allbanned'
 
 export function SettingsPage() {

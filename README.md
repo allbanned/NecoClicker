@@ -98,4 +98,4 @@ build.bat
 
 ## Автор
 
-allbanned · [github.com/BarcaF1/NecoClicker](https://github.com/BarcaF1/NecoClicker)
+allbanned · [github.com/allbanned/NecoClicker](https://github.com/allbanned/NecoClicker)
