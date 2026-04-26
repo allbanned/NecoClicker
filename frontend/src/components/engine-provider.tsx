@@ -6,6 +6,7 @@ export type CPSReport = { cps: number; total: number }
 
 type EngineCtx = {
   running: boolean
+  paused: boolean
   log: string[]
   cps: CPSReport
   history: number[]
@@ -14,6 +15,7 @@ type EngineCtx = {
 
 const Ctx = React.createContext<EngineCtx>({
   running: false,
+  paused: false,
   log: [],
   cps: { cps: 0, total: 0 },
   history: [],
@@ -28,6 +30,7 @@ const Ctx = React.createContext<EngineCtx>({
  */
 export function EngineProvider({ children }: { children: React.ReactNode }) {
   const [running, setRunning] = React.useState(false)
+  const [paused, setPaused] = React.useState(false)
   const [log, setLog] = React.useState<string[]>([])
   const [cps, setCps] = React.useState<CPSReport>({ cps: 0, total: 0 })
   const [history, setHistory] = React.useState<number[]>([])
@@ -36,7 +39,11 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
     let mounted = true
     IsRunning().then((r) => { if (mounted) setRunning(r) })
 
-    EventsOn('engine:state', (r: boolean) => setRunning(r))
+    EventsOn('engine:state', (r: boolean) => {
+      setRunning(r)
+      if (!r) setPaused(false) // остановка движка снимает паузу
+    })
+    EventsOn('engine:paused', (p: boolean) => setPaused(!!p))
     EventsOn('engine:log', (line: string) => {
       setLog((prev) => {
         const next = prev.length > 800 ? prev.slice(-700) : prev.slice()
@@ -56,15 +63,15 @@ export function EngineProvider({ children }: { children: React.ReactNode }) {
 
     return () => {
       mounted = false
-      EventsOff('engine:state', 'engine:log', 'engine:cps')
+      EventsOff('engine:state', 'engine:paused', 'engine:log', 'engine:cps')
     }
   }, [])
 
   const clearLog = React.useCallback(() => setLog([]), [])
 
   const value = React.useMemo(
-    () => ({ running, log, cps, history, clearLog }),
-    [running, log, cps, history, clearLog],
+    () => ({ running, paused, log, cps, history, clearLog }),
+    [running, paused, log, cps, history, clearLog],
   )
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }

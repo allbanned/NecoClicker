@@ -77,6 +77,9 @@ func (a *App) startup(ctx context.Context) {
 
 	if a.cfg.AlwaysOnTop {
 		wruntime.WindowSetAlwaysOnTop(a.ctx, true)
+		wruntime.WindowSetMinSize(a.ctx, miniWindowW, miniWindowH)
+		wruntime.WindowSetMaxSize(a.ctx, miniWindowW, miniWindowH)
+		wruntime.WindowSetSize(a.ctx, miniWindowW, miniWindowH)
 	}
 
 	go a.runTray()
@@ -126,10 +129,31 @@ func themePingColor(name string) (byte, byte, byte) {
 	}
 }
 
+// Размеры окна: полноценное и мини.
+const (
+	miniWindowW = 380
+	miniWindowH = 100
+	fullWindowW = 1100
+	fullWindowH = 720
+)
+
+// SetAlwaysOnTop включает/выключает «поверх всех окон» И автоматически
+// переводит окно в мини-режим (узкая полоска со старт/стоп/пауза).
 func (a *App) SetAlwaysOnTop(v bool) error {
 	a.cfg.AlwaysOnTop = v
 	if a.ctx != nil {
 		wruntime.WindowSetAlwaysOnTop(a.ctx, v)
+		if v {
+			// мини: фиксированный маленький размер
+			wruntime.WindowSetMinSize(a.ctx, miniWindowW, miniWindowH)
+			wruntime.WindowSetMaxSize(a.ctx, miniWindowW, miniWindowH)
+			wruntime.WindowSetSize(a.ctx, miniWindowW, miniWindowH)
+		} else {
+			// полный: снимаем потолок, восстанавливаем размер
+			wruntime.WindowSetMinSize(a.ctx, 900, 600)
+			wruntime.WindowSetMaxSize(a.ctx, 0, 0)
+			wruntime.WindowSetSize(a.ctx, fullWindowW, fullWindowH)
+		}
 	}
 	if it, ok := a.trayPinItem.Load().(*systray.MenuItem); ok && it != nil {
 		if v {

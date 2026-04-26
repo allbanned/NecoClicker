@@ -52,7 +52,7 @@ export function AppSidebar({ page, setPage }: { page: PageId; setPage: (p: PageI
         </div>
         <div className="flex flex-col">
           <span className="text-base font-bold tracking-tight text-glow">NecoClicker</span>
-          <span className="text-[10px] uppercase tracking-widest text-muted-foreground">v1.4</span>
+          <span className="text-[10px] uppercase tracking-widest text-muted-foreground">v1.5</span>
         </div>
       </div>
 

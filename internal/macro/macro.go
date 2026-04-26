@@ -45,18 +45,20 @@ type Step struct {
 
 // Sequence — последовательность кликов "по точкам".
 type Sequence struct {
-	Steps      []Step  `json:"steps"`
-	IntervalMs float64 `json:"interval_ms"` // задержка между шагами
-	Loops      int     `json:"loops"`       // 0 = бесконечно
-	Hotkey     string  `json:"hotkey"`
+	Steps        []Step  `json:"steps"`
+	IntervalMs   float64 `json:"interval_ms"`   // задержка между шагами
+	Loops        int     `json:"loops"`         // 0 = бесконечно
+	Hotkey       string  `json:"hotkey"`        // глобальный хоткей пуск/стоп
+	RecordHotkey string  `json:"record_hotkey"` // клавиша для записи каждой точки
 }
 
 func DefaultSequence() Sequence {
 	return Sequence{
-		Steps:      []Step{},
-		IntervalMs: 200,
-		Loops:      0,
-		Hotkey:     "",
+		Steps:        []Step{},
+		IntervalMs:   200,
+		Loops:        0,
+		Hotkey:       "",
+		RecordHotkey: "F10",
 	}
 }
 
@@ -178,6 +180,9 @@ func (c *Config) Migrate() {
 	}
 	if c.Sequence.Steps == nil {
 		c.Sequence = DefaultSequence()
+	}
+	if c.Sequence.RecordHotkey == "" {
+		c.Sequence.RecordHotkey = "F10"
 	}
 	if c.PauseHotkey == "" {
 		c.PauseHotkey = "F8"

@@ -22,7 +22,6 @@ import { HotkeyRecorder } from '@/components/hotkey-recorder'
 import { cn } from '@/lib/utils'
 
 const MAX_STEPS = 10
-const RECORD_HOTKEY = 'F10' // hardcoded для простоты UX
 
 const BUTTON_OPTIONS = [
   { id: 'left', label: 'ЛКМ' },
@@ -71,22 +70,25 @@ export function StepsPage() {
     if (recording) return
     setRecording(true)
     setRecordError(null)
+    const filter = (seq.record_hotkey || 'F10').trim()
     try {
-      // цикл записи: после каждого нажатия добавляется шаг и снова ждём
+      const { RecordHotkey } = await import('../../wailsjs/go/main/App')
       while (true) {
         const cur = await GetSequence()
         if ((cur.steps?.length ?? 0) >= MAX_STEPS) break
         try {
-          // RecordHotkey возвращает строку при любом первом нажатии — нам её содержимое неважно,
-          // важен сам факт нажатия + текущая позиция курсора
-          const got = await (await import('../../wailsjs/go/main/App')).RecordHotkey(60000)
-          // Esc → выходим
-          if (!got || got === 'Esc' || got === 'Escape') break
+          const got = await RecordHotkey(60000)
+          if (!got) break
+          // Esc — всегда стоп
+          if (got === 'Esc' || got === 'Escape') break
+          // Фильтр: добавляем только если совпадает с настроенной клавишей
+          if (filter && got.toLowerCase() !== filter.toLowerCase()) {
+            continue // не та клавиша — слушаем дальше
+          }
           const s = await CaptureCursor()
           await AddSequenceStep(s)
           await reload()
-        } catch (e: any) {
-          // таймаут или другая ошибка — выходим из цикла
+        } catch {
           break
         }
       }
@@ -125,11 +127,18 @@ export function StepsPage() {
     await SaveSequence(updated)
     setSeq(updated)
   }
+  const setRecordHotkey = async (v: string) => {
+    const updated = new macro.Sequence({ ...seq, record_hotkey: v || 'F10' } as any)
+    await SaveSequence(updated)
+    setSeq(updated)
+  }
 
   const start = async () => {
     if (steps.length === 0) return
     await StartSequence()
   }
+
+  const recordKey = seq.record_hotkey || 'F10'
 
   return (
     <div className="grid h-[calc(100vh-9rem)] gap-4 lg:grid-cols-[1fr_360px]">
@@ -139,7 +148,7 @@ export function StepsPage() {
             <Footprints className="h-5 w-5 text-primary" /> По точкам
           </CardTitle>
           <CardDescription>
-            Запиши до {MAX_STEPS} точек: наведи курсор и нажимай <span className="font-mono text-foreground">{RECORD_HOTKEY}</span>.
+            Запиши до {MAX_STEPS} точек: наведи курсор и нажимай <span className="font-mono text-foreground">{recordKey}</span>.
             После записи можно поменять кнопку для каждого шага.
           </CardDescription>
         </CardHeader>
@@ -152,7 +161,7 @@ export function StepsPage() {
               <div className="flex-1">
                 <div className="font-semibold text-primary">Запись активна</div>
                 <div className="text-xs text-muted-foreground">
-                  Наведи курсор и жми <span className="font-mono text-foreground">{RECORD_HOTKEY}</span>.
+                  Наведи курсор и жми <span className="font-mono text-foreground">{recordKey}</span>.
                   Esc — закончить. Шагов осталось: <b className="text-foreground">{MAX_STEPS - steps.length}</b>
                 </div>
               </div>
@@ -182,7 +191,7 @@ export function StepsPage() {
         <ScrollArea className="flex-1 px-5 pb-5">
           {steps.length === 0 ? (
             <div className="flex h-32 items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground">
-              Шагов нет. Нажми «Начать запись» и тыкай <span className="mx-1 font-mono text-foreground">{RECORD_HOTKEY}</span> в нужных местах экрана.
+              Шагов нет. Нажми «Начать запись» и тыкай <span className="mx-1 font-mono text-foreground">{recordKey}</span> в нужных местах экрана.
             </div>
           ) : (
             <div className="space-y-2">
@@ -256,6 +265,14 @@ export function StepsPage() {
             />
           </div>
           <div className="space-y-1.5">
+            <Label className="flex items-center gap-1.5"><Keyboard className="h-3.5 w-3.5" /> Клавиша записи шага</Label>
+            <HotkeyRecorder value={seq.record_hotkey ?? 'F10'} onChange={setRecordHotkey} placeholder="F10" />
+            <p className="text-[11px] text-muted-foreground">
+              Только эта клавиша добавляет шаг во время записи. Остальные нажатия игнорируются. Esc — всегда выход.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
             <Label className="flex items-center gap-1.5"><Keyboard className="h-3.5 w-3.5" /> Хоткей пуск/стоп</Label>
             <HotkeyRecorder value={seq.hotkey ?? ''} onChange={setHotkey} placeholder="—" />
           </div>
@@ -277,11 +294,12 @@ export function StepsPage() {
 
           <div className="rounded-md border border-dashed bg-muted/20 p-3 text-[11px] text-muted-foreground">
             <b className="text-foreground">Как пользоваться:</b><br />
-            1. Жми «Начать запись» <br />
-            2. Наведи курсор на нужное место → <span className="font-mono">{RECORD_HOTKEY}</span> <br />
-            3. Повтори до 10 раз (или Esc для остановки) <br />
-            4. (опц.) Поменяй кнопку у каждого шага <br />
-            5. Жми «Запустить»
+            1. (опц.) Поменяй клавишу записи выше <br />
+            2. Жми «Начать запись» <br />
+            3. Наведи курсор → <span className="font-mono">{recordKey}</span> <br />
+            4. Повтори до 10 раз (или Esc) <br />
+            5. (опц.) Поменяй кнопку у каждого шага <br />
+            6. Жми «Запустить»
           </div>
         </CardContent>
       </Card>
